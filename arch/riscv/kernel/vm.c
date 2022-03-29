@@ -11,43 +11,53 @@ extern char _erodata[];
 extern char _sdata[];
 extern char _edata[];
 
+/***
+ * SV41 = 9 + 9 + 9 + 14
+ * ------------------------------------
+ * 40 - 32 31 - 23 22 - 14 13 - 0
+ * VPN[1]  vpn[2]  vpn[3]  offset
+ * ------------------------------------
+ * 
+ * 63 - 41:并没有使用
+ * 
+ *      40       32 31       23 22       14 13                           0
+     ---------------------------------------------------------------------
+    |   VPN[2]   |   VPN[1]   |   VPN[0]   |          page offset         |
+     ---------------------------------------------------------------------
+                            Sv41 virtual address
+ * /
+
 /* early_pgtbl: 用于 setup_vm 进行 1GB 的 映射。 */
-unsigned long early_pgtbl[512] __attribute__((__aligned__(0x1000)));
+unsigned long early_pgtbl[512] __attribute__((__aligned__(PGSIZE)));
 
-#ifdef DATA_STRUCT
 //自定义数据结构
-unsigned long page1[512] __attribute__((__aligned__(0x1000)));
-unsigned long page2[512] __attribute__((__aligned__(0x1000)));
+unsigned long page1[512] __attribute__((__aligned__(PGSIZE)));
+unsigned long page2[512] __attribute__((__aligned__(PGSIZE)));
 
-unsigned long array1[512][512] __attribute__((__aligned__(0x1000)));
-unsigned long array2[512][512] __attribute__((__aligned__(0x1000)));
-#endif
 
 void setup_vm(void)
 {
-	#ifdef DATA_STRUCT
 	memset(page1, 0x0, PGSIZE);
 	memset(page2, 0x0, PGSIZE);
 
-	memset(array1, 0x0, 512*PGSIZE);
-	memset(array2, 0x0, 512*PGSIZE);
+	/**
+	 *   直接映射:   0x80000000     0xffffffe000000000 各自1GB
+	 * 40       32 31      23 22       14  13           0
+	 * 000000000 _ 100000000 _ 000000000 _ 00000000000000
+	 *    (0)        (256)        (0)           (0)
+	 * 111100000 _ 000000000 _ 000000000 _ 00000000000000
+	 *   (480)        (0)         (0)           (0) 
+	 */
 	
-	early_pgtbl[2] = (((uint64)page1 >> 12) << 10) + 1;
-	for(int i=0;i<512;i++){
-		page1[i] = (((uint64)array1[i] >> 12) << 10) + 1;
-	    for(int j=0;j<512;j++){
-	        array1[i][j] = ((i*512 + j + (0x80000000 >> 12)) << 10) + 15; //  [ /PPN:44bits/    /perm:10bits/  ]
-	    }
+	early_pgtbl[0] = (((uint64)page1 >> PGSIZE) << 10) + 1;
+	for(int i=256;i<384;i++){
+		page1[i] = (   (i*512 + (0x80000000 >> PGSIZE))    << 10) + 15;
 	}
 
-	early_pgtbl[384] = (((uint64)page2 >> 12) << 10) + 1;
-	for(int i=0;i<512;i++){
-		page2[i] = (((uint64)array2[i] >> 12) << 10) + 1;
-	    for(int j=0;j<512;j++){
-	        array2[i][j] = ((i*512 + j + (0x80000000 >> 12)) << 10) + 15; //  [ /PPN:44bits/    /perm:10bits/  ]
-	    }
+	early_pgtbl[480] = (((uint64)page2 >> PGSIZE) << 10) + 1;
+	for(int i=0;i<128;i++){
+		page2[i] = (   (i*512 + (0x80000000 >> PGSIZE))    << 10) + 15;
 	}
-	#endif
 	
 	/* 
     1. 由于是进行 1GB 的映射 这里不需要使用多级页表 
@@ -57,9 +67,9 @@ void setup_vm(void)
         低 30 bit 作为 页内偏移 这里注意到 30 = 9 + 9 + 12， 即我们只使用根页表， 根页表的每个 entry 都对应 1GB 的区域。 
     3. Page Table Entry 的权限 V | R | W | X 位设置为 1
     */
-    memset(early_pgtbl, 0x0, PGSIZE);
-    early_pgtbl[2] = (0x80000000 >> 2) + 15;
-	early_pgtbl[384] = (0x80000000 >> 2) + 15;
+    // memset(early_pgtbl, 0x0, PGSIZE);
+    // early_pgtbl[2] = (0x80000000 >> 2) + 15;
+	// early_pgtbl[384] = (0x80000000 >> 2) + 15;
 }
 
 /* 创建多级页表映射关系 */
@@ -68,7 +78,7 @@ void create_mapping(uint64 *pgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 	/*
     pgtbl 为根页表的基地址
     va, pa 为需要映射的虚拟地址、物理地址
-    sz 为映射的大小     :      对应的4096
+    sz 为映射的大小     :      对应的(4K)4096  -> (16K)PGSIZE
     perm 为映射的读写权限:      R:1,W:2,X:4
 
     创建多级页表的时候可以使用 kalloc() 来获取一页作为页表目录
@@ -80,13 +90,13 @@ void create_mapping(uint64 *pgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 	// va~va+sz*block  -->  pa~pa+sz*block(映射)
 	// printk("sz = %ld\n",sz);
 
-	for (int i = 0; i < (sz + 4095) / 4096; i++)
+	for (int i = 0; i < (sz + PGSIZE - 1) / PGSIZE; i++)
 	{
-		va_i = va + (i << 12);
+		va_i = va + (i << PGSHIFT);	//14bits Offset
 		//分割虚拟地址得到对应的表项序号
-		vpn2 = (va_i << 25) >> 55;
-		vpn1 = (va_i << 34) >> 55;
-		vpn0 = (va_i << 43) >> 55;
+		vpn2 = (va_i << (PGSHIFT + 9)) >> 55;
+		vpn1 = (va_i << (PGSHIFT + 9 * 2)) >> 55;
+		vpn0 = (va_i << (PGSHIFT + 9 * 3)) >> 55;
 
 		//三级页表
 		//第一级
@@ -94,22 +104,22 @@ void create_mapping(uint64 *pgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 		{						
 			uint64 tmp = kalloc() - PA2VA_OFFSET;						//说明 V = 0
 			
-			pgtbl[vpn2] = ((tmp >> 12) << 10) + 1; //  [ |PPN|:44bits |perm|=000:Pointer to next level of page table  /valid = 1/]
+			pgtbl[vpn2] = ((tmp >> PGSHIFT) << 10) + 1; //  [ |PPN|:44bits |perm|=000:Pointer to next level of page table  /valid = 1/]
 			// printk("tmp = %lx\n",pgtbl[vpn2]);
 		}
-		uint64 *pgt1 = (uint64 *)((pgtbl[vpn2] >> 10) << 12);
+		uint64 *pgt1 = (uint64 *)((pgtbl[vpn2] >> 10) << PGSHIFT);
 		//第二级
 		if (pgt1[vpn1] % 2 == 0)
 		{											  
 			uint64 tmp = kalloc() - PA2VA_OFFSET;						//说明 V = 0
 			
-			pgt1[vpn1] = ((tmp >> 12) << 10) + 1; //  [ |PPN|:44bits |perm|=000:Pointer to next level of page table  /valid = 1/]
+			pgt1[vpn1] = ((tmp >> PGSHIFT) << 10) + 1; //  [ |PPN|:44bits |perm|=000:Pointer to next level of page table  /valid = 1/]
 			// printk("pgt1[vpn1] = %lx\n",pgt1[vpn1]);
 		}
-		uint64 *pgt0 = (uint64 *)(((pgt1[vpn1] >> 10) << 12)+PA2VA_OFFSET);
+		uint64 *pgt0 = (uint64 *)(((pgt1[vpn1] >> 10) << PGSHIFT)+PA2VA_OFFSET);
 		//第三级
 		// printk("%")
-		pgt0[vpn0] = (((pa >> 12) + i) << 10) + (perm); //  [ /PPN:44bits/    /perm:10bits/  ]
+		pgt0[vpn0] = (((pa >> PGSHIFT) + i) << 10) + (perm); //  [ /PPN:44bits/    /perm:10bits/  ]
 		// printk("pgt0[vpn0] = %lx\n",pgt0[vpn0]);
 	}
 	// printk("create_mapping end!\n")
@@ -130,7 +140,7 @@ void create_mapping(uint64 *pgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 
 
 /* swapper_pg_dir: kernel pagetable 根目录， 在 setup_vm_final 进行映射。 */
-unsigned long swapper_pg_dir[512] __attribute__((__aligned__(0x1000)));
+unsigned long swapper_pg_dir[512] __attribute__((__aligned__(PGSIZE)));
 
 void setup_vm_final(void)
 {

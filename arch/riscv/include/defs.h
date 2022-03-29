@@ -7,7 +7,8 @@
 #define PHY_SIZE  128 * 1024 * 1024 // 128MB， QEMU 默认内存大小
 #define PHY_END   (PHY_START + PHY_SIZE)
 
-#define PGSIZE 0x1000 // 4KB
+#define PGSIZE 0x4000 // 16KB
+#define PGSHIFT 14
 #define PGROUNDUP(addr) ((addr + PGSIZE - 1) & (~(PGSIZE - 1)))
 #define PGROUNDDOWN(addr) (addr & (~(PGSIZE - 1)))
 
